@@ -7,6 +7,9 @@
 #include "duckdb/parser/parsed_data/drop_info.hpp"
 #include "duckdb/planner/operator/logical_insert.hpp"
 #include "duckdb/storage/database_size.hpp"
+#include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/parser/expression/constant_expression.hpp"
+#include "duckdb/parser/expression/function_expression.hpp"
 
 #include "storage/quack_catalog.hpp"
 #include "storage/quack_table.hpp"
@@ -124,6 +127,15 @@ unique_ptr<LogicalOperator> QuackCatalog::BindCreateIndex(Binder &binder, Create
 
 DatabaseSize QuackCatalog::GetDatabaseSize(ClientContext &context) {
 	throw NotImplementedException("GetDatabaseSize not implemented yet");
+}
+
+unique_ptr<TableRef> QuackCatalog::RemotePushdown(ClientContext &context, unique_ptr<QueryNode> node) {
+	vector<unique_ptr<ParsedExpression>> args;
+	args.push_back(make_uniq<ConstantExpression>(Value(GetName())));
+	args.push_back(make_uniq<ConstantExpression>(Value(node->ToString())));
+	auto func_ref = make_uniq<TableFunctionRef>();
+	func_ref->function = make_uniq<FunctionExpression>("quack_query_by_name", std::move(args));
+	return func_ref;
 }
 
 //! Whether or not this is an in-memory SQLite database

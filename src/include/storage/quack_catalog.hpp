@@ -54,6 +54,11 @@ public:
 	bool InMemory() override;
 	string GetDBPath() override;
 
+	bool IsRemoteCatalog() const override {
+		return true;
+	}
+	unique_ptr<TableRef> RemotePushdown(ClientContext &context, unique_ptr<QueryNode> node) override;
+
 	unique_ptr<ColumnDataCollection> ExecuteCommandInternal(ClientContext &context, const string &query);
 	const QuackUri &GetServerUri();
 	const string &GetConnectionId();
