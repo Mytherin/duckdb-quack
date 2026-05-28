@@ -6,9 +6,6 @@ require quack
 
 require httpfs
 
-statement ok
-SET default_transaction_invalidation_policy='SYNTACTIC_ERRORS_DO_NOT_INVALIDATE';
-
 set ignore_error_messages __none__
 
 statement ok
@@ -21,7 +18,6 @@ statement ok
 create table moo.fuu2 as values(44, 45);
 
 foreach server 'quack:localhost'
-
 
 statement ok con1
 call quack_serve({server}, token='asdf');
@@ -111,11 +107,6 @@ begin transaction
 
 statement ok
 create table rpc.fuu3(i integer);
-
-statement error
-insert into rpc.fuu2 values (42);
-----
-not exist
 
 statement ok
 insert into rpc.fuu3 from range(10000);

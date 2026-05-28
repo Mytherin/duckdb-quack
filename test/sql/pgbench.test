@@ -8,7 +8,6 @@ require httpfs
 
 set ignore_error_messages __none__
 
-
 statement ok con1
 CREATE TABLE pgbench_accounts(aid INTEGER, bid INTEGER, abalance INTEGER, filler VARCHAR);
 
@@ -31,10 +30,8 @@ create secret (type quack, token 'asdf')
 statement ok con2
 attach 'quack:localhost' as rpc
 
-
 statement ok con2
 CALL enable_logging('Quack');
-
 
 loop i 0 10
 
