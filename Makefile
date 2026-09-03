@@ -27,4 +27,12 @@ test_duckdb_reldebug:
 test_duckdb_slow:
 	python3 scripts/run_duckdb_tests.py --build release --slow
 
+# Re-derive test/configs/quack_client_server.json's skip_tests from what actually fails today:
+# run everything with the skip list disabled, then group the failures by cause. Do this after
+# fixing something the skip list blames, so the groups shrink instead of going stale.
+test_duckdb_reclassify:
+	python3 scripts/run_duckdb_tests.py --build release --no-skip --report duckdb_test_sweep.json
+	python3 scripts/classify_duckdb_tests.py duckdb_test_sweep.json --write
+
 .PHONY: test_duckdb test_duckdb_release test_duckdb_debug test_duckdb_reldebug test_duckdb_slow
+.PHONY: test_duckdb_reclassify

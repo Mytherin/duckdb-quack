@@ -54,18 +54,40 @@ def collect_tests(include_slow):
     return sorted(tests)
 
 
-def worker_config(port, tmpdir):
+def worker_config(port, tmpdir, no_skip=False):
     """The shared config with the quack port rewritten, so workers do not collide."""
-    if port == BASE_PORT:
+    if port == BASE_PORT and not no_skip:
         return CONFIG
     with open(CONFIG) as f:
         config = json.load(f)
     for key in ("on_init", "on_cleanup"):
         config[key] = config[key].replace(str(BASE_PORT), str(port))
+    if no_skip:
+        # Run everything, so a sweep can re-derive the skip list from what actually fails today.
+        config["skip_tests"] = []
     path = os.path.join(tmpdir, f"quack_client_server_{port}.json")
     with open(path, "w") as f:
         json.dump(config, f, indent=2)
     return path
+
+
+# unittest prints progress to stdout but the detail of a failure to stderr, so the two streams
+# cannot be interleaved back together. They do not need to be: every failure block opens with a
+# numbered header naming the test file it belongs to, which is enough to attribute it.
+#     3. test/optimizer/conjunction_simplification.test:16
+#     ====...
+#     Wrong result hash! (test/optimizer/conjunction_simplification.test:16)!
+FAILURE = re.compile(r"^\d+\. (test/\S+?):\d+$", re.M)
+
+
+def split_failures(stderr):
+    """{test path: the failure detail printed for it}; the first block wins per test."""
+    per_test = {}
+    matches = list(FAILURE.finditer(stderr))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(stderr)
+        per_test.setdefault(match.group(1), stderr[match.start():end])
+    return per_test
 
 
 def tally(output):
@@ -93,7 +115,7 @@ DEGRADED = "Startup queries provided via on_init failed: IO Error"
 
 
 def run_chunk(worker, tests, unittest, config, tmpdir, env, label, per_test):
-    """Run one chunk in a fresh process; returns (counts, output, died)."""
+    """Run one chunk in a fresh process; returns (counts, output, stderr, died)."""
     listing = os.path.join(tmpdir, f"chunk_{worker}_{label}.txt")
     with open(listing, "w") as f:
         f.write("\n".join(tests) + "\n")
@@ -106,16 +128,22 @@ def run_chunk(worker, tests, unittest, config, tmpdir, env, label, per_test):
             [unittest, "--test-config", config, "--test-dir", "duckdb", "-f", listing],
             cwd=ROOT, env=env, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired as expired:
-        output = (expired.stdout or "") + (expired.stderr or "")
-        if isinstance(output, bytes):
-            output = output.decode(errors="replace")
-        return tally(output), output + f"\n*** chunk timed out after {timeout}s ***\n", True
-    output = process.stdout + process.stderr
-    return tally(output), output, process.returncode not in (0, 1)
+        def text(stream):
+            stream = stream or ""
+            return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
+        stdout, stderr = text(expired.stdout), text(expired.stderr)
+        note = f"\n*** chunk timed out after {timeout}s ***\n"
+        return tally(stdout), stdout + stderr + note, stderr + note, True
+    stdout, stderr = process.stdout, process.stderr
+    # Catch exits with the number of failed assertions, so the return code says nothing about
+    # whether the process survived. A run that reached its own summary line did; one that did not
+    # crashed part-way through the chunk.
+    died = not (SUMMARY.search(stdout) or ALL_PASSED.search(stdout))
+    return tally(stdout), stdout + stderr, stderr, died
 
 
 def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, totals,
-               failures):
+               failures, outcomes):
     """Run one worker's tests, chunk_size at a time, in fresh processes.
 
     A chunk whose process dies, or which degrades into on_init failures, is split in
@@ -127,8 +155,8 @@ def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, to
     env["DUCKDB_TEST_TEMP_DIR_ROOT"] = f"duckdb_unittest_tempdir/quack_w{worker}"
 
     def run(chunk, first, label):
-        counts, output, died = run_chunk(worker, chunk, unittest, config, tmpdir, env,
-                                         label, per_test)
+        counts, output, stderr, died = run_chunk(worker, chunk, unittest, config, tmpdir, env,
+                                                 label, per_test)
         if (died or DEGRADED in output) and len(chunk) > 1:
             half = len(chunk) // 2
             run(chunk[:half], first, label + "a")
@@ -137,6 +165,11 @@ def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, to
         with print_lock:
             for i in range(4):
                 totals[i] += counts[i]
+            outcomes.update(split_failures(stderr))
+            # A chunk down to a single test that still died is a crash or a hang: it never
+            # printed a failure block of its own, so record the whole chunk output for it.
+            if died and len(chunk) == 1 and chunk[0] not in outcomes:
+                outcomes[chunk[0]] = output
             if counts[2] or died:
                 failures.append((worker, first, output))
             span = f"{first}" if len(chunk) == 1 else f"{first}-{first + len(chunk) - 1}"
@@ -163,6 +196,12 @@ def main():
     parser.add_argument("--timeout-per-test", type=int, default=None,
                         help="seconds of chunk timeout budget per test (default 4, or 30 with "
                              "--slow); a chunk that overruns is split and retried")
+    parser.add_argument("--no-skip", action="store_true",
+                        help="ignore the config's skip_tests, so every test runs; use with "
+                             "--report to re-derive the skip list from what fails today")
+    parser.add_argument("--report",
+                        help="write {test: failure output} for every test that failed to this JSON "
+                             "file, for scripts/classify_duckdb_tests.py")
     parser.add_argument("filter", nargs="?",
                         help="only run tests whose path contains this substring")
     args = parser.parse_args()
@@ -182,6 +221,7 @@ def main():
 
     totals = [0, 0, 0, 0]
     failures = []
+    outcomes = {}
     with tempfile.TemporaryDirectory() as tmpdir:
         threads = []
         for worker in range(args.jobs):
@@ -189,12 +229,17 @@ def main():
             thread = threading.Thread(
                 target=run_worker,
                 args=(worker, tests[worker::args.jobs], unittest,
-                      worker_config(BASE_PORT + worker, tmpdir), tmpdir,
-                      args.chunk_size, per_test, totals, failures))
+                      worker_config(BASE_PORT + worker, tmpdir, args.no_skip), tmpdir,
+                      args.chunk_size, per_test, totals, failures, outcomes))
             thread.start()
             threads.append(thread)
         for thread in threads:
             thread.join()
+
+    if args.report:
+        with open(args.report, "w") as f:
+            json.dump(outcomes, f)
+        print(f"wrote failure output for {len(outcomes)} tests to {args.report}", flush=True)
 
     print(f"\ntotal: {totals[0]} cases, {totals[1]} passed, "
           f"{totals[2]} failed, {totals[3]} skipped")

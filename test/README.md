@@ -73,6 +73,29 @@ unimplemented feature skips instead of failing.
 `settings: async_threads=2` is not about semantics: it keeps the per-instance thread count small,
 which matters because of the leak described next.
 
+### Regenerating the skip list
+
+The groups are derived from a run, not maintained by hand. After fixing something the list blames,
+re-derive them:
+
+```bash
+make test_duckdb_reclassify
+```
+
+That runs the whole suite with `skip_tests` ignored (`run_duckdb_tests.py --no-skip --report`,
+which records the failure block unittest printed for each failing test) and then sorts those tests
+into causes (`classify_duckdb_tests.py --write`, which rewrites `skip_tests` in the config). The
+rules live in `RULES` in that script, ordered most specific first, so a test that trips over a
+known root cause is filed under it rather than under the symptom it happens to show. To see how a
+group was arrived at before writing it:
+
+```bash
+scripts/classify_duckdb_tests.py duckdb_test_sweep.json                 # the counts
+scripts/classify_duckdb_tests.py duckdb_test_sweep.json --show explain  # the SQL and error per test
+```
+
+A sweep runs several thousand more tests than a normal run and takes correspondingly longer.
+
 ### Known caveat: the run can exhaust the process thread limit
 
 Server-side connections hold a strong reference to the `DatabaseInstance` that owns the server, so
