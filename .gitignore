@@ -8,5 +8,5 @@ testext
 test/python/__pycache__/
 .Rhistory
 vcpkg
-duckdb_test_sweep.json
+duckdb_test_sweep.log
 scripts/__pycache__/

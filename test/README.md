@@ -21,30 +21,28 @@ client/server connection instead of against a local DuckDB catalog:
 * `on_cleanup` stops the server again (see the note on the leak below).
 
 The `unittest` binary built here has quack, httpfs and json linked in, so pointing it at the
-`duckdb` submodule with `--test-dir` registers DuckDB's tests. `scripts/run_duckdb_tests.py` does
-that for you:
+`duckdb` submodule with `--test-dir` registers DuckDB's 4723 tests. The run itself is driven by
+DuckDB's own runner, `duckdb/scripts/ci/run_tests.py`, which already does batching, timeouts,
+retries and crash handling:
 
 ```bash
-make test_duckdb          # the fast tests (.test)
-make test_duckdb_slow     # adds .test_slow
+make test_duckdb
 
-scripts/run_duckdb_tests.py --jobs 4          # four workers, one quack port each
-scripts/run_duckdb_tests.py test/sql/join     # only tests under that path
-```
-
-The script runs the tests as a series of short-lived unittest processes instead of one long one -
-see the caveat at the end for why - and gives each process a timeout. A chunk that overruns, dies,
-or degrades into `on_init` failures is split in half and retried, so a test that crashes or hangs
-the process costs only itself instead of everything queued behind it. To run a single chunk by hand:
-
-```bash
-./build/release/test/unittest \
+python3 duckdb/scripts/ci/run_tests.py build/release/test/unittest \
     --test-config test/configs/quack_client_server.json \
-    --test-dir duckdb "test/sql/join/*"
+    --test-flags "--test-dir duckdb" --workers 1 --batch-size 1 "test/sql/join/*"
 ```
 
-The config binds a fixed port (9494), so only one run may use it at a time; the script rewrites the
-port for each worker when you pass `--jobs`.
+Two of those flags are not optional here:
+
+* **`--workers 1`** - the config binds a fixed port (9494), so two unittest processes cannot run
+  it at the same time.
+* **`--batch-size 1`** - `run_tests.py` reports a failure per *batch*, not per test. At the default
+  batch size ten individually failing tests come back as "9 passed, 1 failed", which is fine for
+  gating CI but useless for deciding which tests to skip. A fresh process per test also keeps the
+  instance leak described at the end of this file bounded.
+
+To run one test the way the runner would, take the `reproduce:` line it prints on failure.
 
 ### What is skipped, and why
 
@@ -94,31 +92,31 @@ re-derive them:
 make test_duckdb_reclassify
 ```
 
-That runs the whole suite with `skip_tests` ignored (`run_duckdb_tests.py --no-skip --report`,
-which records the failure block unittest printed for each failing test) and then sorts those tests
-into causes (`classify_duckdb_tests.py --write`, which rewrites `skip_tests` in the config). The
-rules live in `RULES` in that script, ordered most specific first, so a test that trips over a
-known root cause is filed under it rather than under the symptom it happens to show. To see how a
-group was arrived at before writing it:
+That runs the whole suite with `skip_tests` ignored, saving the runner's output to
+`duckdb_test_sweep.log`, then sorts the failures into causes and rewrites `skip_tests`
+(`scripts/classify_duckdb_tests.py --write`). The rules live in `RULES` in that script, ordered
+most specific first, so a test that trips over a known root cause is filed under it rather than
+under the symptom it happens to show. To see how a group was arrived at before writing it:
 
 ```bash
-scripts/classify_duckdb_tests.py duckdb_test_sweep.json                 # the counts
-scripts/classify_duckdb_tests.py duckdb_test_sweep.json --show explain  # the SQL and error per test
+scripts/classify_duckdb_tests.py duckdb_test_sweep.log                 # the counts
+scripts/classify_duckdb_tests.py duckdb_test_sweep.log --show explain  # the SQL and error per test
 ```
 
-A sweep runs several thousand more tests than a normal run and takes correspondingly longer.
+To see what a change actually moved, diff the old and new skip lists by reason with DuckDB's own
+`duckdb/scripts/test_config_compare.py old.json new.json`.
 
-A sweep sees one run, so a test that is nondeterministic over the wire - a `UNION ALL` with no
-`ORDER BY`, say, whose branches race - can pass during the sweep and fail afterwards. When that
-happens, merge the new report into the sweep's before rewriting, rather than rewriting from the
-new one alone, which would drop everything the sweep found:
+One wrinkle the classifier has to work around: `run_tests.py` renders a sqllogictest failure block
+in full, but drops the block for a failure Catch raised itself - an abort, or a failing `on_init` /
+`on_cleanup` - because its `iter_stdout_failure_blocks` skips the fatal-error and explicit-message
+forms. Those arrive in the log as a bare `assertions:` line with no reason at all, so the
+classifier re-runs just those few tests directly to find out why they failed.
 
-```bash
-python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); \
-    [a.setdefault(k, v) for k, v in b.items()]; json.dump(a, open(sys.argv[1], "w"))' \
-    duckdb_test_sweep.json new_report.json
-scripts/classify_duckdb_tests.py duckdb_test_sweep.json --write
-```
+A sweep takes about an hour, since `--batch-size 1` means a process per test.
+
+A sweep also sees one run, so a test that is nondeterministic over the wire - a `UNION ALL` with no
+`ORDER BY`, say, whose branches race - can pass during the sweep and fail afterwards. Re-run the
+sweep, or add the test to the group it belongs in by hand.
 
 ### Known caveat: the run can exhaust the process thread limit
 

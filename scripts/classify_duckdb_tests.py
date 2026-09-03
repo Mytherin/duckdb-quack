@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Turn a sweep report into the ``skip_tests`` groups of the quack test config.
+"""Turn a test run into the ``skip_tests`` groups of the quack test config.
 
-``run_duckdb_tests.py --no-skip --report sweep.json`` records, for every DuckDB test that
-fails over a quack connection, the failure block unittest printed for it. This script sorts
-those tests into causes and rewrites ``test/configs/quack_client_server.json`` accordingly,
-so the skip list stays a description of what is broken today rather than a frozen snapshot.
+The run itself is done by DuckDB's own runner, ``duckdb/scripts/ci/run_tests.py``; this script
+only reads its output, sorts the failures into causes, and rewrites
+``test/configs/quack_client_server.json``, so the skip list stays a description of what is
+broken today rather than a frozen snapshot. ``make test_duckdb_reclassify`` does both steps.
+
+The run must use ``--batch-size 1``: run_tests.py counts a failure per *batch*, not per test,
+so at the default batch size ten failing tests are reported as "9 passed, 1 failed" - fine for
+gating CI, useless for deciding which individual tests to skip.
 
 Usage:
-    scripts/run_duckdb_tests.py --no-skip --report sweep.json
-    scripts/classify_duckdb_tests.py sweep.json            # show the grouping
-    scripts/classify_duckdb_tests.py sweep.json --write    # and write it to the config
-    scripts/classify_duckdb_tests.py sweep.json --show unclassified   # inspect one group
+    make test_duckdb_reclassify                            # sweep + write, the normal path
+    scripts/classify_duckdb_tests.py sweep.log             # show the grouping
+    scripts/classify_duckdb_tests.py sweep.log --write     # and write it to the config
+    scripts/classify_duckdb_tests.py sweep.log --show explain     # inspect one group
 """
 
 import argparse
@@ -18,22 +22,61 @@ import collections
 import json
 import os
 import re
+import subprocess
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CONFIG = os.path.join(ROOT, "test", "configs", "quack_client_server.json")
+UNITTEST = os.path.join(ROOT, "build", "release", "test", "unittest")
 
 SEPARATOR = "=" * 80
-HEADER = re.compile(r"^\d+\. test/\S+?:\d+$")
+HEADER = re.compile(r"^\d+\. test/\S+?:\d+$", re.M)
 # "Binder Error: ...", "Invalid Input Error: ...", "Conversion Error: ..."
 ERROR = re.compile(r"^((?:\w+ )*?\w*Error): (.*)$", re.M)
+
+ANSI = re.compile(r"\x1b\[[0-9;]*m")
+# run_tests.py brackets each failing test with a rule, names it, and closes with a reproduce line.
+FAIL = re.compile(r"^error: FAIL (test/\S+)$", re.M)
+REPRODUCE = re.compile(r"^reproduce:$", re.M)
+
+
+def read_run(path):
+    """{test path: the detail run_tests.py printed for it} from one run_tests.py log."""
+    text = ANSI.sub("", open(path, errors="replace").read())
+    failures = {}
+    matches = list(FAIL.finditer(text))
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[match.end():end]
+        stop = REPRODUCE.search(body)
+        failures.setdefault(match.group(1), body[:stop.start()].strip() if stop else body.strip())
+    return failures
+
+
+def rerun(test, config):
+    """Run one test directly and return everything it printed.
+
+    run_tests.py drops the Catch block for a failure Catch raised itself - an abort, or a
+    failing on_init / on_cleanup - because `iter_stdout_failure_blocks` skips its fatal-error
+    and explicit-message forms. Those arrive here as a bare "assertions:" line with no reason
+    at all, so for the handful of tests that happens to, ask unittest directly.
+    """
+    if not os.path.exists(UNITTEST):
+        return ""
+    try:
+        done = subprocess.run([UNITTEST, "--test-dir", "duckdb", "--test-config", config, test],
+                              cwd=ROOT, capture_output=True, text=True, timeout=120)
+    except (subprocess.TimeoutExpired, OSError):
+        return "the test did not finish"
+    return done.stdout + done.stderr
 
 
 def parse(block):
     """(headline, sql, actual) from one unittest failure block."""
-    lines = block.split("\n")
-    if not lines or not HEADER.match(lines[0]):
-        return "", "", block  # a crashed/hung chunk, recorded whole
+    match = HEADER.search(block)
+    if not match:
+        return "", "", block  # Catch reported it itself: an abort, or on_init / on_cleanup
+    lines = block[match.start():].split("\n")
     sections = []
     current = []
     for line in lines[1:]:
@@ -250,25 +293,37 @@ def classify(report):
     return {key: sorted(tests) for key, tests in groups.items()}
 
 
+def resolve(failures, config):
+    """Fill in the reason for every failure run_tests.py could not render one for."""
+    unreadable = [test for test, body in failures.items() if not HEADER.search(body)]
+    if unreadable:
+        print(f"asking unittest directly about {len(unreadable)} failures run_tests.py did not "
+              f"render", file=sys.stderr, flush=True)
+    for test in unreadable:
+        failures[test] = rerun(test, config)
+    return failures
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("report", help="JSON written by run_duckdb_tests.py --report")
+    parser.add_argument("log", help="output of duckdb/scripts/ci/run_tests.py --batch-size 1")
+    parser.add_argument("--config", default=CONFIG,
+                        help="config to re-run unrendered failures under (default: the quack one)")
     parser.add_argument("--write", action="store_true",
                         help="rewrite skip_tests in the config with the grouping")
     parser.add_argument("--show", help="print the failing SQL and error of every test in a group")
     args = parser.parse_args()
 
-    with open(args.report) as f:
-        report = json.load(f)
-    groups = classify(report)
+    failures = resolve(read_run(args.log), args.config)
+    groups = classify(failures)
 
     if args.show:
         if args.show not in groups:
             sys.exit(f"no group {args.show!r}; have {', '.join(sorted(groups))}")
         for test in groups[args.show]:
-            headline, sql, actual = parse(report[test])
-            print(f"--- {test}\n    {headline.splitlines()[0] if headline else '(process died)'}"
+            headline, sql, actual = parse(failures[test])
+            print(f"--- {test}\n    {headline.splitlines()[0] if headline else '(no failure block)'}"
                   f"\n    sql:    {sql.splitlines()[0][:160] if sql else ''}"
                   f"\n    actual: {actual.splitlines()[0][:160] if actual else ''}")
         return 0

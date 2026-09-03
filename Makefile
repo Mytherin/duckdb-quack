@@ -10,29 +10,34 @@ include extension-ci-tools/makefiles/duckdb_extension.Makefile
 include extension-ci-tools/makefiles/vcpkg.Makefile
 
 #### Running the regular DuckDB test suite through a quack client/server connection ####
-# scripts/run_duckdb_tests.py drives the unittest binary built here (quack + httpfs are linked in)
-# against the tests in the duckdb submodule, using test/configs/quack_client_server.json: it starts
-# a quack server inside each test instance, attaches back to it and makes that remote catalog the
-# default database, so every statement travels through the quack RPC protocol.
+# DuckDB's own runner drives the unittest binary built here (quack + httpfs are linked in) against
+# the tests in the duckdb submodule, using test/configs/quack_client_server.json: it starts a quack
+# server inside each test instance, attaches back to it and makes that remote catalog the default
+# database, so every statement travels through the quack RPC protocol.
 #
-# The script runs the tests as a series of short-lived processes because a DuckDB instance that
-# runs a quack server is never reclaimed while its server holds connections -- see test/README.md.
+# --workers 1 because the config binds a fixed port (9494), so two unittest processes cannot run
+# it at once. --batch-size 1 because run_tests.py counts a failure per batch rather than per test,
+# and a fresh process per test also keeps the instance leak described in test/README.md bounded.
+DUCKDB_TESTS = python3 duckdb/scripts/ci/run_tests.py --test-flags "--test-dir duckdb" \
+	--workers 1 --batch-size 1
+
 test_duckdb: test_duckdb_release
 test_duckdb_release:
-	python3 scripts/run_duckdb_tests.py --build release
+	$(DUCKDB_TESTS) build/release/test/unittest --test-config test/configs/quack_client_server.json
 test_duckdb_debug:
-	python3 scripts/run_duckdb_tests.py --build debug
+	$(DUCKDB_TESTS) build/debug/test/unittest --test-config test/configs/quack_client_server.json
 test_duckdb_reldebug:
-	python3 scripts/run_duckdb_tests.py --build reldebug
-test_duckdb_slow:
-	python3 scripts/run_duckdb_tests.py --build release --slow
+	$(DUCKDB_TESTS) build/reldebug/test/unittest --test-config test/configs/quack_client_server.json
 
 # Re-derive test/configs/quack_client_server.json's skip_tests from what actually fails today:
 # run everything with the skip list disabled, then group the failures by cause. Do this after
 # fixing something the skip list blames, so the groups shrink instead of going stale.
 test_duckdb_reclassify:
-	python3 scripts/run_duckdb_tests.py --build release --no-skip --report duckdb_test_sweep.json
-	python3 scripts/classify_duckdb_tests.py duckdb_test_sweep.json --write
+	python3 -c "import json; c = json.load(open('test/configs/quack_client_server.json')); \
+		c['skip_tests'] = []; json.dump(c, open('build/quack_no_skip.json', 'w'), indent=2)"
+	-$(DUCKDB_TESTS) build/release/test/unittest --test-config build/quack_no_skip.json \
+		> duckdb_test_sweep.log 2>&1
+	python3 scripts/classify_duckdb_tests.py duckdb_test_sweep.log --config build/quack_no_skip.json --write
 
-.PHONY: test_duckdb test_duckdb_release test_duckdb_debug test_duckdb_reldebug test_duckdb_slow
+.PHONY: test_duckdb test_duckdb_release test_duckdb_debug test_duckdb_reldebug
 .PHONY: test_duckdb_reclassify

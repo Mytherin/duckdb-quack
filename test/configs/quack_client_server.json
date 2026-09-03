@@ -934,7 +934,6 @@
     {
       "reason": "The client abandons an in-flight request: 'superseded by a new query'",
       "paths": [
-        "test/fuzzer/pedro/concurrent_catalog_usage.test",
         "test/issues/general/test_17446.test",
         "test/sql/catalog/dependencies/drop_recreate_schema_dependency.test",
         "test/sql/catalog/dependencies/test_concurrent_drop.test",
@@ -946,6 +945,7 @@
         "test/sql/catalog/test_schema.test",
         "test/sql/catalog/test_standard_schema.test",
         "test/sql/parallelism/interquery/concurrent_appends.test",
+        "test/sql/parallelism/interquery/concurrent_force_checkpoint.test",
         "test/sql/parallelism/interquery/concurrent_index_scans_while_appending.test",
         "test/sql/parallelism/interquery/concurrent_reads_while_altering.test",
         "test/sql/parallelism/interquery/concurrent_reads_while_renaming.test",
@@ -955,7 +955,8 @@
         "test/sql/storage/wal/wal_drop_table.test",
         "test/sql/transactions/test_create_drop_conflict.test",
         "test/sql/transactions/test_create_drop_conflict_variation1.test",
-        "test/sql/transactions/test_create_drop_conflict_variation2.test"
+        "test/sql/transactions/test_create_drop_conflict_variation2.test",
+        "test/sql/upsert/concurrent_insert_or_replace.test"
       ]
     },
     {
@@ -1031,8 +1032,7 @@
         "test/sql/update/test_string_update_rollback_null.test",
         "test/sql/update/test_update.test",
         "test/sql/update/test_update_delete_same_tuple.test",
-        "test/sql/update/test_update_same_value.test",
-        "test/sql/upsert/concurrent_insert_or_replace.test"
+        "test/sql/update/test_update_same_value.test"
       ]
     },
     {
@@ -1239,6 +1239,7 @@
     {
       "reason": "The remote error text differs from what the test expects, beyond the exception type",
       "paths": [
+        "test/fuzzer/pedro/concurrent_catalog_usage.test",
         "test/sql/aggregate/aggregates/test_approx_quantile.test",
         "test/sql/catalog/dependencies/test_prepare_dependencies_transactions.test",
         "test/sql/catalog/did_you_mean.test",
@@ -1286,7 +1287,6 @@
         "test/sql/index/art/test_index_key_rebind.test",
         "test/sql/join/nearest/nearest_basic.test",
         "test/sql/optimizer/expression/test_nop_arithmetic.test",
-        "test/sql/parallelism/interquery/concurrent_force_checkpoint.test",
         "test/sql/parser/switch_case.test",
         "test/sql/pragma/profiling/test_custom_profiling_row_group_metrics_local_storage.test",
         "test/sql/settings/reset/reset_memory_limit.test",
@@ -1548,7 +1548,6 @@
         "test/sql/insert/unaligned_interleaved_appends.test",
         "test/sql/pg_catalog/system_functions.test",
         "test/sql/prepared/prepared_stale_statistics.test",
-        "test/sql/setops/test_union_subquery.test",
         "test/sql/settings/connection_local_settings.test",
         "test/sql/show_select/show_select_constraints.test",
         "test/sql/subquery/any_all/test_multi_column_mark_join_nulls.test",
