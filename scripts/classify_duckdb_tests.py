@@ -118,9 +118,19 @@ def says(pattern):
 # an EXPLAIN that dies on the qualified-name parser bug belongs in the parser group. Each entry
 # is (key, the reason written into the config, predicate over the parsed failure block).
 RULES = [
+    ("on_init",
+     "The test changes the instance in a way the config's own on_init cannot survive (memory "
+     "limit, threads, extension settings), so the startup queries fail rather than the test",
+     says(r"Startup queries provided via on_init failed")),
+
+    ("on_cleanup",
+     "The test leaves the connection somewhere the config's on_cleanup cannot run from, so the "
+     "clean-up routine fails rather than the test",
+     says(r"Error while running clean-up routine")),
+
     ("crash_or_hang",
      "Aborts or hangs the unittest process, so it takes the whole run down rather than failing "
-     "on its own",
+     "on its own. Order-dependent: these pass when run alone",
      lambda headline, sql, actual: not headline),
 
     ("error_type_lost",

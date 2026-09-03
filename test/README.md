@@ -48,28 +48,32 @@ port for each worker when you pass `--jobs`.
 
 ### What is skipped, and why
 
-1413 of DuckDB's ~4700 fast tests do not pass over a quack connection today; 3288 do. The failing
+1437 of DuckDB's 4723 fast tests do not pass over a quack connection today. A sweep saw 3287
+passing; one more test is nondeterministic over the wire and fails only sometimes. The failing
 ones are listed in `skip_tests`, grouped by cause, so a fix shows up as a group that shrinks:
 
 | tests | cause |
 | ----- | ----- |
 | 345 | client-side `Parser Error: syntax error at or near "."` - a qualified name deparsed with an empty component, after `ALTER` + `DROP` + a DDL statement |
-| 238 | only the error *message* crosses the wire, not the exception type, so a test that asserts `Binder Error` gets the right message as an `Invalid Input Error` |
+| 239 | only the error *message* crosses the wire, not the exception type, so a test that asserts `Binder Error` gets the right message as an `Invalid Input Error` |
 | 158 | `EXPLAIN` / plan inspection - the local plan is replaced by a single remote quack scan |
 | 138 | a remote result with duplicate column names cannot be bound |
 | 118 | sequences, types, indexes, macros and functions are invisible in the client catalog |
-| 71 | transaction semantics differ over the wire, mostly `cannot start a transaction within a transaction` |
+| 72 | transaction semantics differ over the wire, mostly `cannot start a transaction within a transaction` |
 | 53 | `ATTACH` fails outright: a remote table cannot be bound while the client builds the catalog |
 | 51 | catalog/metadata queries (`SHOW`, `duckdb_*`, `information_schema`, `pg_catalog`) describe the quack catalog |
-| 44 | remote error, not grouped further yet |
+| 45 | remote error, not grouped further yet |
 | 38 | the statement is re-serialized to SQL text lossily - lambdas come back as `->`, `NULL::TYPE` loses its cast, extension-type literals are emitted unquoted |
-| 32 | different result, not grouped further yet |
+| 33 | different result, not grouped further yet |
 | 25 | prepared statement parameters do not reach the server |
 | 24 | the test collides with the config's own `on_init` (secret manager settings, or a server that is already serving) |
-| 23 | the client abandons an in-flight request: `superseded by a new query` |
+| 22 | the client abandons an in-flight request: `superseded by a new query` |
 | 21 | feature not implemented in the quack storage extension |
 | 18 | a statement expected to fail succeeds over the connection |
-| 16 | the remote error text differs beyond the exception type |
+| 16 | the test leaves the connection somewhere `on_cleanup` cannot run from |
+| 15 | the remote error text differs beyond the exception type |
+| 4 | the test changes the instance so `on_init` cannot survive it (memory limit, threads) |
+| 2 | aborts the process (see below) |
 
 The two lossy-deparse groups (345 and 38) are the same root cause; the first is kept separate
 because its trigger is understood and it is by far the largest single win available.
@@ -104,6 +108,18 @@ scripts/classify_duckdb_tests.py duckdb_test_sweep.json --show explain  # the SQ
 
 A sweep runs several thousand more tests than a normal run and takes correspondingly longer.
 
+A sweep sees one run, so a test that is nondeterministic over the wire - a `UNION ALL` with no
+`ORDER BY`, say, whose branches race - can pass during the sweep and fail afterwards. When that
+happens, merge the new report into the sweep's before rewriting, rather than rewriting from the
+new one alone, which would drop everything the sweep found:
+
+```bash
+python3 -c 'import json,sys; a=json.load(open(sys.argv[1])); b=json.load(open(sys.argv[2])); \
+    [a.setdefault(k, v) for k, v in b.items()]; json.dump(a, open(sys.argv[1], "w"))' \
+    duckdb_test_sweep.json new_report.json
+scripts/classify_duckdb_tests.py duckdb_test_sweep.json --write
+```
+
 ### Known caveat: the run can exhaust the process thread limit
 
 Server-side connections hold a strong reference to the `DatabaseInstance` that owns the server, so
@@ -120,12 +136,18 @@ all ("Server returned nothing (no headers, no data)") and every remaining test f
 That is why `scripts/run_duckdb_tests.py` chunks the run - a fresh process every few hundred tests
 keeps the accumulation bounded. Fixing the reference cycle would remove the need for the script.
 
-No test in the last full sweep aborted or hung the process on its own, so the skip list has no
-crash group any more: the `COMMENT ON COLUMN` abort in
-`RemotePushdownOptimizer::RewriteStatement(AlterStatement&)` is fixed and those tests now pass, and
-the `DROP SCHEMA` cases that used to block forever now come back as an error after about thirty
-seconds instead. The runner still bounds every chunk with a timeout and still splits and retries a
-chunk that dies, because the underlying hang - the client blocking in `PostRawLocked` on a request
-the server never dispatches, seen from both `QuackCatalog::DropSchema` and
-`QuackScanBindCatalogName` - was always intermittent, and one bad test must not take the run with
-it. `classify_duckdb_tests.py` keeps a `crash_or_hang` rule for the same reason.
+A few tests still abort or hang the whole process rather than failing on their own, which is why
+the runner bounds every chunk with a timeout and splits and retries a chunk that dies.
+`COMMENT ON COLUMN` still aborts in `RemotePushdownOptimizer::RewriteStatement(AlterStatement&)`:
+it calls `info.GetCatalogType()` on a `SetColumnCommentInfo` whose `catalog_entry_type` is still
+`INVALID`, because whether the target is a table or a view is only resolved during binding. The
+quack client can also still block on a request the server never dispatches (seen from both
+`QuackCatalog::DropSchema` and `QuackScanBindCatalogName`, on the `BEGIN TRANSACTION` that
+`QuackTransaction::ForceStart()` sends, with every server worker idle). Those tests are in the
+`crash_or_hang` group.
+
+Note that Catch traps the abort and still prints its summary, so a crash does not look like a dead
+process from the outside - everything queued behind the aborting test simply never runs. The runner
+watches for Catch's "due to a fatal error condition" instead, and reports a failure that Catch
+raised itself (an abort, or a failing `on_init` / `on_cleanup`) under the banner Catch prints on
+stdout, since those never produce a sqllogictest failure block on stderr.

@@ -27,6 +27,43 @@
   ],
   "skip_tests": [
     {
+      "reason": "The test changes the instance in a way the config's own on_init cannot survive (memory limit, threads, extension settings), so the startup queries fail rather than the test",
+      "paths": [
+        "test/fuzzer/sqlsmith/nullif_map_with_config.test",
+        "test/sql/index/art/storage/test_art_duckdb_versions.test",
+        "test/sql/json/test_json_persistence.test",
+        "test/sql/storage/unzip.test"
+      ]
+    },
+    {
+      "reason": "The test leaves the connection somewhere the config's on_cleanup cannot run from, so the clean-up routine fails rather than the test",
+      "paths": [
+        "test/sql/attach/attach_use_rollback.test",
+        "test/sql/export/export_macros.test",
+        "test/sql/export/export_quoted_enum.test",
+        "test/sql/export/parquet/export_parquet_enum.test",
+        "test/sql/export/parquet/export_parquet_map.test",
+        "test/sql/export/parquet/export_parquet_union.test",
+        "test/sql/index/art/storage/test_art_import.test",
+        "test/sql/storage/compression/alp/alp_corrupted_file.test",
+        "test/sql/storage/compression/alp/alp_corrupted_offsets.test",
+        "test/sql/storage/compression/alp/alp_corrupted_vector_size.test",
+        "test/sql/storage/compression/alprd/alprd_corrupted_dict_size.test",
+        "test/sql/storage/compression/dictionary/dict_corrupted_offset.test",
+        "test/sql/storage/compression/dictionary/invalid_dictionary_metadata.test",
+        "test/sql/storage/compression/fsst/invalid_fsst_bitpacking_width.test",
+        "test/sql/storage/corrupt/corrupt_catalog_entry.test",
+        "test/sql/transactions/commit_revert_failure.test"
+      ]
+    },
+    {
+      "reason": "Aborts or hangs the unittest process, so it takes the whole run down rather than failing on its own. Order-dependent: these pass when run alone",
+      "paths": [
+        "test/sql/catalog/comment_on_extended.test",
+        "test/sql/catalog/comment_on_pg_description.test"
+      ]
+    },
+    {
       "reason": "Only the error message crosses the wire, not the exception type (ErrorResponse serializes error.RawMessage() only), so the right error arrives as an 'Invalid Input Error'",
       "paths": [
         "test/common/test_cast_hugeint.test",
@@ -132,6 +169,7 @@
         "test/sql/binder/test_string_alias.test",
         "test/sql/cast/cast_error_location.test",
         "test/sql/catalog/comment_on.test",
+        "test/sql/catalog/comment_on_wal.test",
         "test/sql/catalog/dependencies/change_type_of_table_column_referenced_by_index.test",
         "test/sql/catalog/dependencies/remove_table_column_referenced_by_index.test",
         "test/sql/catalog/dependencies/test_alter_owned_by.test",
@@ -896,6 +934,7 @@
     {
       "reason": "The client abandons an in-flight request: 'superseded by a new query'",
       "paths": [
+        "test/fuzzer/pedro/concurrent_catalog_usage.test",
         "test/issues/general/test_17446.test",
         "test/sql/catalog/dependencies/drop_recreate_schema_dependency.test",
         "test/sql/catalog/dependencies/test_concurrent_drop.test",
@@ -907,7 +946,6 @@
         "test/sql/catalog/test_schema.test",
         "test/sql/catalog/test_standard_schema.test",
         "test/sql/parallelism/interquery/concurrent_appends.test",
-        "test/sql/parallelism/interquery/concurrent_force_checkpoint.test",
         "test/sql/parallelism/interquery/concurrent_index_scans_while_appending.test",
         "test/sql/parallelism/interquery/concurrent_reads_while_altering.test",
         "test/sql/parallelism/interquery/concurrent_reads_while_renaming.test",
@@ -917,8 +955,7 @@
         "test/sql/storage/wal/wal_drop_table.test",
         "test/sql/transactions/test_create_drop_conflict.test",
         "test/sql/transactions/test_create_drop_conflict_variation1.test",
-        "test/sql/transactions/test_create_drop_conflict_variation2.test",
-        "test/sql/upsert/concurrent_insert_or_replace.test"
+        "test/sql/transactions/test_create_drop_conflict_variation2.test"
       ]
     },
     {
@@ -994,7 +1031,8 @@
         "test/sql/update/test_string_update_rollback_null.test",
         "test/sql/update/test_update.test",
         "test/sql/update/test_update_delete_same_tuple.test",
-        "test/sql/update/test_update_same_value.test"
+        "test/sql/update/test_update_same_value.test",
+        "test/sql/upsert/concurrent_insert_or_replace.test"
       ]
     },
     {
@@ -1201,7 +1239,6 @@
     {
       "reason": "The remote error text differs from what the test expects, beyond the exception type",
       "paths": [
-        "test/fuzzer/pedro/concurrent_catalog_usage.test",
         "test/sql/aggregate/aggregates/test_approx_quantile.test",
         "test/sql/catalog/dependencies/test_prepare_dependencies_transactions.test",
         "test/sql/catalog/did_you_mean.test",
@@ -1249,6 +1286,7 @@
         "test/sql/index/art/test_index_key_rebind.test",
         "test/sql/join/nearest/nearest_basic.test",
         "test/sql/optimizer/expression/test_nop_arithmetic.test",
+        "test/sql/parallelism/interquery/concurrent_force_checkpoint.test",
         "test/sql/parser/switch_case.test",
         "test/sql/pragma/profiling/test_custom_profiling_row_group_metrics_local_storage.test",
         "test/sql/settings/reset/reset_memory_limit.test",
@@ -1510,6 +1548,7 @@
         "test/sql/insert/unaligned_interleaved_appends.test",
         "test/sql/pg_catalog/system_functions.test",
         "test/sql/prepared/prepared_stale_statistics.test",
+        "test/sql/setops/test_union_subquery.test",
         "test/sql/settings/connection_local_settings.test",
         "test/sql/show_select/show_select_constraints.test",
         "test/sql/subquery/any_all/test_multi_column_mark_join_nulls.test",

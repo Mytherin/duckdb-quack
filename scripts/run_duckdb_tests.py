@@ -80,13 +80,23 @@ def worker_config(port, tmpdir, no_skip=False):
 FAILURE = re.compile(r"^\d+\. (test/\S+?):\d+$", re.M)
 
 
-def split_failures(stderr):
+# Not every failure comes from a sqllogictest statement. A test whose on_init or on_cleanup
+# fails, or which aborts the process, is reported only by Catch on stdout, under a banner
+# naming the test:
+#     ------------------------------------------------------------------------------
+#     test/sql/attach/attach_use_rollback.test
+#     ------------------------------------------------------------------------------
+BANNER = re.compile(r"-{79}\n(test/\S+)\n-{79}$", re.M)
+
+
+def split_failures(stdout, stderr):
     """{test path: the failure detail printed for it}; the first block wins per test."""
     per_test = {}
-    matches = list(FAILURE.finditer(stderr))
-    for index, match in enumerate(matches):
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(stderr)
-        per_test.setdefault(match.group(1), stderr[match.start():end])
+    for text, pattern, group in ((stderr, FAILURE, 1), (stdout, BANNER, 1)):
+        matches = list(pattern.finditer(text))
+        for index, match in enumerate(matches):
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+            per_test.setdefault(match.group(group), text[match.start():end])
     return per_test
 
 
@@ -112,10 +122,13 @@ def tally(output):
 # The quack server inside a long-lived process eventually stops answering (see the module
 # docstring); when that happens every remaining test in the chunk fails in on_init with this.
 DEGRADED = "Startup queries provided via on_init failed: IO Error"
+# Catch traps the signal and still prints its summary, but everything queued behind the test
+# that aborted never ran, so the chunk has to be split and retried like any other death.
+FATAL = "due to a fatal error condition"
 
 
 def run_chunk(worker, tests, unittest, config, tmpdir, env, label, per_test):
-    """Run one chunk in a fresh process; returns (counts, output, stderr, died)."""
+    """Run one chunk in a fresh process; returns (counts, output, stdout, stderr, died)."""
     listing = os.path.join(tmpdir, f"chunk_{worker}_{label}.txt")
     with open(listing, "w") as f:
         f.write("\n".join(tests) + "\n")
@@ -133,13 +146,14 @@ def run_chunk(worker, tests, unittest, config, tmpdir, env, label, per_test):
             return stream.decode(errors="replace") if isinstance(stream, bytes) else stream
         stdout, stderr = text(expired.stdout), text(expired.stderr)
         note = f"\n*** chunk timed out after {timeout}s ***\n"
-        return tally(stdout), stdout + stderr + note, stderr + note, True
+        return tally(stdout), stdout + stderr + note, stdout, stderr + note, True
     stdout, stderr = process.stdout, process.stderr
     # Catch exits with the number of failed assertions, so the return code says nothing about
     # whether the process survived. A run that reached its own summary line did; one that did not
     # crashed part-way through the chunk.
-    died = not (SUMMARY.search(stdout) or ALL_PASSED.search(stdout))
-    return tally(stdout), stdout + stderr, stderr, died
+    died = (not (SUMMARY.search(stdout) or ALL_PASSED.search(stdout))
+            or FATAL in stdout)
+    return tally(stdout), stdout + stderr, stdout, stderr, died
 
 
 def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, totals,
@@ -155,8 +169,8 @@ def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, to
     env["DUCKDB_TEST_TEMP_DIR_ROOT"] = f"duckdb_unittest_tempdir/quack_w{worker}"
 
     def run(chunk, first, label):
-        counts, output, stderr, died = run_chunk(worker, chunk, unittest, config, tmpdir, env,
-                                                 label, per_test)
+        counts, output, stdout, stderr, died = run_chunk(worker, chunk, unittest, config,
+                                                         tmpdir, env, label, per_test)
         if (died or DEGRADED in output) and len(chunk) > 1:
             with print_lock:
                 print(f"worker {worker}: tests {first}-{first + len(chunk) - 1}: splitting after "
@@ -168,7 +182,8 @@ def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, to
         with print_lock:
             for i in range(4):
                 totals[i] += counts[i]
-            outcomes.update(split_failures(stderr))
+            for name, detail in split_failures(stdout, stderr).items():
+                outcomes.setdefault(name, detail)
             # A chunk down to a single test that still died is a crash or a hang: it never
             # printed a failure block of its own, so record the whole chunk output for it.
             if died and len(chunk) == 1 and chunk[0] not in outcomes:
