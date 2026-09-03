@@ -57,81 +57,173 @@ def parse(block):
     return headline, sql, actual
 
 
-# Ordered most specific first; the first rule whose test matches owns the test. Each entry is
-# (key, reason written into the config, predicate over the parsed failure block).
+MISMATCH = "Query failed, but error message did not match expected error message: "
+REGEX_PREFIX = "<REGEX>:"
+ERROR_TYPE = re.compile(r"((?:\w+ )*?\w*Error)")
+
+
+def error_of(text):
+    """(exception type, message) if the text starts with a DuckDB error, else (None, text)."""
+    match = ERROR.match(text or "")
+    return (match.group(1), match.group(2)) if match else (None, text or "")
+
+
+def expected_error(headline):
+    """The error text the test asserted on, from a message-mismatch headline."""
+    if not headline.startswith(MISMATCH):
+        return None
+    # unittest appends " (<test file>:<line>)!" to the headline.
+    return re.sub(r"\s*\(test/\S+?:\d+\)!?$", "", headline[len(MISMATCH):]).strip()
+
+
+def only_the_type_differs(headline, actual):
+    """True when the test would have passed had the exception type crossed the wire.
+
+    That is the whole of the wire's error handling today: ErrorResponse carries
+    error.RawMessage() and nothing else, so the client rebuilds every remote error as
+    INVALID_INPUT. Tests that name an exception type - most name only the type, as in
+    "statement error / Binder Error" - fail on a message that is otherwise exactly right.
+
+    So rather than compare the two texts, put the type the test asked for back onto the
+    error that came out and re-apply the test's own assertion: a regex search for a
+    <REGEX>: expectation, a substring match otherwise. If that passes, the type is all
+    that was wrong.
+    """
+    expected = expected_error(headline)
+    actual_type, message = error_of(actual)
+    if not expected or not actual_type:
+        return False
+    is_regex = expected.startswith(REGEX_PREFIX)
+    if is_regex:
+        expected = expected[len(REGEX_PREFIX):]
+    type_match = ERROR_TYPE.search(expected)
+    if not type_match or type_match.group(1) == actual_type:
+        return False
+    repaired = f"{type_match.group(1)}: {message}"
+    if is_regex:
+        try:
+            return bool(re.search(expected, repaired, re.DOTALL))
+        except re.error:
+            return False
+    return expected in repaired
+
+
+def says(pattern):
+    return lambda headline, sql, actual: bool(re.search(pattern, actual))
+
+
+# Ordered most specific first; the first rule whose predicate matches owns the test. Rules that
+# key on the error a statement actually raised come before rules that key on the shape of the
+# statement, so a test is filed under the thing that broke rather than the thing it was doing:
+# an EXPLAIN that dies on the qualified-name parser bug belongs in the parser group. Each entry
+# is (key, the reason written into the config, predicate over the parsed failure block).
 RULES = [
     ("crash_or_hang",
      "Aborts or hangs the unittest process, so it takes the whole run down rather than failing "
      "on its own",
      lambda headline, sql, actual: not headline),
 
+    ("error_type_lost",
+     "Only the error message crosses the wire, not the exception type (ErrorResponse serializes "
+     "error.RawMessage() only), so the right error arrives as an 'Invalid Input Error'",
+     lambda headline, sql, actual: only_the_type_differs(headline, actual)),
+
     ("parser_error_dot",
-     'Client-side \'Parser Error: syntax error at or near "."\' - a qualified name is rendered '
-     "with an empty component during the catalog reload that follows ALTER + DROP",
-     lambda headline, sql, actual: 'syntax error at or near "."' in actual),
+     "Client-side 'syntax error at or near \".\"' - a qualified name is rendered with an empty "
+     "component during the catalog reload that follows ALTER + DROP. The most common case of "
+     "the lossy deparse below, and counted separately because the trigger is understood",
+     says(r'syntax error at or near "\."')),
+
+    ("query_roundtrip",
+     "The client re-serializes the parsed statement back to SQL text before sending it, and the "
+     "deparse is lossy: lambdas come out as the deprecated -> arrow, NULL::TYPE loses its cast, "
+     "and literals of extension types are emitted unquoted, so the server rejects the text",
+     says(r"Deprecated lambda arrow|syntax error at or near"
+          r"|ORDER BY non-integer literal has no effect"
+          r"|Struct remap can only remap nested types"
+          r"|Could not choose a best candidate function")),
 
     ("duplicate_columns",
      "A remote query whose result has duplicate column names cannot be bound: "
      'table "quack_query_by_name" has duplicate column name',
-     lambda headline, sql, actual: "has duplicate column name" in actual),
+     says(r"has duplicate column name")),
+
+    ("attach_bind_failure",
+     "ATTACH fails outright: a remote table cannot be bound while the client builds the catalog "
+     "(Failed to bind remote table while attaching quack catalog)",
+     says(r"Failed to bind remote table while attaching")),
+
+    ("prepared_parameters",
+     "Prepared statement parameters do not reach the server: 'Values were not provided for the "
+     "following parameters'",
+     says(r"Values were not provided for the following parameters")),
+
+    ("superseded",
+     "The client abandons an in-flight request: 'superseded by a new query'",
+     says(r"superseded by a new query")),
+
+    ("transactions",
+     "Transaction semantics differ over the wire - most of these are 'cannot start a transaction "
+     "within a transaction', the rest aborted-transaction state and COMMIT/ROLLBACK with no "
+     "active transaction",
+     says(r"(?i)\b(cannot (start|commit|rollback)|transaction is aborted|no transaction is "
+          r"active|transaction within a transaction)\b")),
+
+    ("constraints",
+     "Constraints behave differently over the wire: duplicate key / PRIMARY KEY / UNIQUE / "
+     "foreign key violations that the local catalog does not raise",
+     says(r"(?i)(violates (primary key|unique) constraint|PRIMARY KEY or UNIQUE constraint "
+          r"violation|can have only one primary key|Failed to create foreign key|Conflict target "
+          r"has to be provided)")),
 
     ("unimplemented",
      "Feature not implemented in the quack storage extension yet",
-     lambda headline, sql, actual: re.search(
-         r"not (implemented|supported)( yet)?|is only implemented for DuckDB tables", actual)),
+     says(r"not (implemented|supported)( yet| for this table type)?"
+          r"|is only implemented for DuckDB tables")),
 
-    ("explain",
-     "EXPLAIN / plan inspection: every base table lives behind a remote quack scan, so the local "
-     "plan is replaced by a single 'Quack Query By Name' node and the expected operators never "
-     "appear",
-     lambda headline, sql, actual: re.match(r"(?is)\s*EXPLAIN\b", sql)
-     or "QUACK_QUERY_BY_NAME" in actual or "Quack Query By Name" in actual),
+    ("catalog_objects_invisible",
+     "The quack client catalog only exposes tables and views: sequences, types, indexes, macros "
+     "and functions created through the connection are not visible to the client binder",
+     says(r"(?i)(sequence|type|index|macro|(scalar|table|aggregate) function) with name "
+          r"\S+ (does not exist|already exists)")),
 
-    ("error_type_lost",
-     "Only the error message crosses the wire, not the exception type (ErrorResponse serializes "
-     "error.RawMessage() only), so remote errors arrive as 'Invalid Input Error'",
-     lambda headline, sql, actual: headline.startswith("Query failed, but error message did not "
-                                                       "match")
-     and actual.startswith("Invalid Input Error")),
+    ("config_conflict",
+     "The test collides with the config's own on_init rather than with quack itself: it changes "
+     "secret manager settings, or re-runs on_init against a server that is already serving",
+     says(r"Changing Secret Manager settings|Server already exists for quack:"
+          r"|Schema with name \"main\" already exists")),
 
     ("unexpected_success",
      "A statement expected to fail succeeds over the quack connection",
      lambda headline, sql, actual: headline.startswith("Query unexpectedly succeeded")),
 
-    ("transactions",
-     "Transaction semantics differ over the wire (nested BEGIN, aborted-transaction state and "
-     "ROLLBACK without an active transaction behave differently on the remote side)",
-     lambda headline, sql, actual: re.search(
-         r"(?i)\btransaction\b", actual) or re.match(
-         r"(?is)\s*(BEGIN|COMMIT|ROLLBACK|START TRANSACTION|ABORT)\b", sql)),
-
-    ("catalog_metadata",
-     "Result differs: catalog/metadata queries (SHOW, duckdb_* tables, information_schema, "
-     "comments) describe the quack catalog rather than a local DuckDB catalog",
-     lambda headline, sql, actual: re.search(
-         r"(?i)\b(show|describe|summarize|duckdb_\w+|information_schema|pg_catalog|"
-         r"current_(database|schema|schemas)|pragma_\w+)\b", sql)
-     or re.match(r"(?is)\s*(PRAGMA|SHOW|DESCRIBE|SUMMARIZE|CALL)\b", sql)),
-
-    ("catalog_objects_invisible",
-     "The quack client catalog only exposes tables and views: sequences, types, indexes and "
-     "user-defined functions created through the connection are not visible to the client binder",
-     lambda headline, sql, actual: re.search(
-         r"(?i)(sequence|type|index|macro|function) with name \S+ does not exist", actual)
-     or re.match(r"(?is)\s*(CREATE|DROP|ALTER)\s+(OR REPLACE\s+)?"
-                 r"(TEMP\w*\s+)?(UNIQUE\s+)?(SEQUENCE|TYPE|INDEX|MACRO|FUNCTION)\b", sql)),
-
     ("error_text_differs",
-     "The remote error text differs from what the test expects",
-     lambda headline, sql, actual: headline.startswith("Query failed, but error message did not "
-                                                       "match")),
+     "The remote error text differs from what the test expects, beyond the exception type",
+     lambda headline, sql, actual: headline.startswith(MISMATCH)),
 
     ("remote_error",
-     "Fails over a quack connection with a remote error not yet grouped further",
-     lambda headline, sql, actual: bool(ERROR.match(actual))),
+     "A statement that should succeed fails with a remote error not yet grouped further",
+     lambda headline, sql, actual: error_of(actual)[0] is not None),
+
+    # From here on the statement ran; only the result is wrong, so the shape of the query is
+    # what identifies the cause.
+    ("explain",
+     "EXPLAIN / plan inspection: every base table lives behind a remote quack scan, so the local "
+     "plan is replaced by a single 'Quack Query By Name' node and the expected operators never "
+     "appear",
+     lambda headline, sql, actual: bool(re.match(r"(?is)\s*EXPLAIN\b", sql))
+     or "QUACK_QUERY_BY_NAME" in actual or "Quack Query By Name" in actual),
+
+    ("catalog_metadata",
+     "Result differs: catalog and metadata queries (SHOW, duckdb_* tables, information_schema, "
+     "pg_catalog, comments) describe the quack catalog rather than a local DuckDB one",
+     lambda headline, sql, actual: bool(re.search(
+         r"(?i)\b(duckdb_\w+|information_schema|pg_\w+|sqlite_\w+|pragma_\w+"
+         r"|current_(database|schema|schemas))\b", sql)
+         or re.match(r"(?is)\s*(PRAGMA|SHOW|DESCRIBE|SUMMARIZE|CALL)\b", sql))),
 
     ("wrong_result",
-     "Fails over a quack connection with a wrong result, for a reason not yet grouped",
+     "Returns a different result over a quack connection, for a reason not yet grouped",
      lambda headline, sql, actual: True),
 ]
 

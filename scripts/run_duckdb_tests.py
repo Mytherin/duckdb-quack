@@ -158,6 +158,9 @@ def run_worker(worker, tests, unittest, config, tmpdir, chunk_size, per_test, to
         counts, output, stderr, died = run_chunk(worker, chunk, unittest, config, tmpdir, env,
                                                  label, per_test)
         if (died or DEGRADED in output) and len(chunk) > 1:
+            with print_lock:
+                print(f"worker {worker}: tests {first}-{first + len(chunk) - 1}: splitting after "
+                      + ("the process died" if died else "on_init started failing"), flush=True)
             half = len(chunk) // 2
             run(chunk[:half], first, label + "a")
             run(chunk[half:], first + half, label + "b")

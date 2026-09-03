@@ -48,23 +48,31 @@ port for each worker when you pass `--jobs`.
 
 ### What is skipped, and why
 
-About 1870 of DuckDB's ~5500 tests do not pass over a quack connection today. They are listed in
-`skip_tests`, grouped by cause, so the groups shrink as the underlying issues are fixed:
+1413 of DuckDB's ~4700 fast tests do not pass over a quack connection today; 3288 do. The failing
+ones are listed in `skip_tests`, grouped by cause, so a fix shows up as a group that shrinks:
 
 | tests | cause |
 | ----- | ----- |
-| 398 | client-side `Parser Error: syntax error at or near "."` after `ALTER` + `DROP` + a DDL statement |
-| 278 | feature not implemented in the quack storage extension (CHECKPOINT, VACUUM, CREATE INDEX/SEQUENCE/TYPE/FUNCTION, ALTER, DELETE/UPDATE planning, RETURNING) |
-| 242 | `EXPLAIN` / plan inspection - the local plan is replaced by a single remote quack scan |
-| 226 | only the error *message* crosses the wire, not the exception type, so every remote error arrives as an `Invalid Input Error` |
-| 152 | sequences, types, indexes and functions are invisible in the client catalog |
-| 119 | a remote result with duplicate column names cannot be bound |
-| 107 | remote `Invalid Input Error`, not grouped further yet |
-| 94 | catalog/metadata queries (`SHOW`, `duckdb_*`, `information_schema`, comments) describe the quack catalog |
-| 93 | transaction semantics differ over the wire |
-| 80 | other divergences, not grouped further yet |
-| 37 | error text differs, expected error not raised, or the test breaks the config's own on_init / on_cleanup / on_new_connection |
-| 11 | aborts or hangs the whole process (see below) |
+| 345 | client-side `Parser Error: syntax error at or near "."` - a qualified name deparsed with an empty component, after `ALTER` + `DROP` + a DDL statement |
+| 238 | only the error *message* crosses the wire, not the exception type, so a test that asserts `Binder Error` gets the right message as an `Invalid Input Error` |
+| 158 | `EXPLAIN` / plan inspection - the local plan is replaced by a single remote quack scan |
+| 138 | a remote result with duplicate column names cannot be bound |
+| 118 | sequences, types, indexes, macros and functions are invisible in the client catalog |
+| 71 | transaction semantics differ over the wire, mostly `cannot start a transaction within a transaction` |
+| 53 | `ATTACH` fails outright: a remote table cannot be bound while the client builds the catalog |
+| 51 | catalog/metadata queries (`SHOW`, `duckdb_*`, `information_schema`, `pg_catalog`) describe the quack catalog |
+| 44 | remote error, not grouped further yet |
+| 38 | the statement is re-serialized to SQL text lossily - lambdas come back as `->`, `NULL::TYPE` loses its cast, extension-type literals are emitted unquoted |
+| 32 | different result, not grouped further yet |
+| 25 | prepared statement parameters do not reach the server |
+| 24 | the test collides with the config's own `on_init` (secret manager settings, or a server that is already serving) |
+| 23 | the client abandons an in-flight request: `superseded by a new query` |
+| 21 | feature not implemented in the quack storage extension |
+| 18 | a statement expected to fail succeeds over the connection |
+| 16 | the remote error text differs beyond the exception type |
+
+The two lossy-deparse groups (345 and 38) are the same root cause; the first is kept separate
+because its trigger is understood and it is by far the largest single win available.
 
 `skip_error_messages` additionally skips any test that trips over a "not implemented yet" /
 "not supported yet" error from the quack storage extension, so a newly added test that hits an
@@ -112,9 +120,12 @@ all ("Server returned nothing (no headers, no data)") and every remaining test f
 That is why `scripts/run_duckdb_tests.py` chunks the run - a fresh process every few hundred tests
 keeps the accumulation bounded. Fixing the reference cycle would remove the need for the script.
 
-A handful of tests also abort or hang the whole process rather than failing on their own:
-`COMMENT ON COLUMN` aborts in `RemotePushdownOptimizer::RewriteStatement(AlterStatement&)`, and the
-quack client can block forever on a request the server never dispatches (seen from both
-`QuackCatalog::DropSchema` and `QuackScanBindCatalogName`, always on the `BEGIN TRANSACTION` that
-`QuackTransaction::ForceStart()` sends, with every server worker idle). The ones seen so far are in
-the first `skip_tests` group, but the hang is intermittent, which is why the runner has a timeout.
+No test in the last full sweep aborted or hung the process on its own, so the skip list has no
+crash group any more: the `COMMENT ON COLUMN` abort in
+`RemotePushdownOptimizer::RewriteStatement(AlterStatement&)` is fixed and those tests now pass, and
+the `DROP SCHEMA` cases that used to block forever now come back as an error after about thirty
+seconds instead. The runner still bounds every chunk with a timeout and still splits and retries a
+chunk that dies, because the underlying hang - the client blocking in `PostRawLocked` on a request
+the server never dispatches, seen from both `QuackCatalog::DropSchema` and
+`QuackScanBindCatalogName` - was always intermittent, and one bad test must not take the run with
+it. `classify_duckdb_tests.py` keeps a `crash_or_hang` rule for the same reason.
