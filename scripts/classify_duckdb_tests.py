@@ -209,7 +209,8 @@ RULES = [
      says(r"Deprecated lambda arrow|syntax error at or near"
           r"|ORDER BY non-integer literal has no effect"
           r"|Struct remap can only remap nested types"
-          r"|Could not choose a best candidate function")),
+          r"|Could not choose a best candidate function"
+          r"|No function matches the given name and argument types")),
 
     ("duplicate_columns",
      "A remote query whose result has duplicate column names cannot be bound: "
@@ -220,6 +221,17 @@ RULES = [
      "ATTACH fails outright: a remote table cannot be bound while the client builds the catalog "
      "(Failed to bind remote table while attaching quack catalog)",
      says(r"Failed to bind remote table while attaching")),
+
+    ("settings_not_propagated",
+     "A setting the test changes on its connection never reaches the server, so the remote side "
+     "plans with its own default - confirmed for scalar_subquery_error_on_multiple_rows, where "
+     "SET ...=false on the client still raises the error remotely",
+     says(r"More than one row returned by a subquery used as an expression")),
+
+    ("catalog_stale_after_ddl",
+     "A table, view or schema created or renamed earlier in the test is not found afterwards: "
+     "the client catalog does not pick the change up",
+     says(r"(?i)(table|view|schema) with name \S+ does not exist")),
 
     ("prepared_parameters",
      "Prepared statement parameters do not reach the server: 'Values were not provided for the "

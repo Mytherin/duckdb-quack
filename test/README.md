@@ -61,20 +61,21 @@ cause, so a fix shows up as a group that shrinks:
 | 118 | sequences, types, indexes, macros and functions are invisible in the client catalog |
 | 71 | transaction semantics differ over the wire, mostly `cannot start a transaction within a transaction` |
 | 53 | `ATTACH` fails outright: a remote table cannot be bound while the client builds the catalog |
-| 51 | catalog/metadata queries (`SHOW`, `duckdb_*`, `information_schema`, `pg_catalog`) describe the quack catalog |
-| 44 | remote error, not grouped further yet |
-| 38 | the statement is re-serialized to SQL text lossily - lambdas come back as `->`, `NULL::TYPE` loses its cast, extension-type literals are emitted unquoted |
-| 32 | different result, not grouped further yet |
+| 51 | catalog/metadata queries (`SHOW`, `duckdb_*`, `information_schema`, `pg_catalog`, `pragma_storage_info`) describe the quack catalog |
+| 44 | the statement is re-serialized to SQL text lossily - lambdas come back as `->`, `NULL::TYPE` and `::FLOAT[3]` lose their cast, extension-type literals are emitted unquoted |
+| 33 | different result, not grouped further yet |
 | 25 | prepared statement parameters do not reach the server |
 | 24 | the client abandons an in-flight request: `superseded by a new query` |
 | 24 | the test collides with the config's own `on_init` (secret manager settings, or a server that is already serving) |
 | 21 | feature not implemented in the quack storage extension |
 | 18 | a statement expected to fail succeeds over the connection |
+| 18 | remote error, not grouped further yet |
 | 16 | the test leaves the connection somewhere `on_cleanup` cannot run from |
-| 15 | the remote error text differs beyond the exception type |
+| 16 | a table, view or schema created or renamed earlier in the test is not found afterwards |
+| 11 | the remote error text differs beyond the exception type |
+| 8 | a setting the test changes on its connection never reaches the server, so the remote side plans with its own default |
 | 4 | the test changes the instance so `on_init` cannot survive it (memory limit, threads) |
 | 2 | aborts the process (see below) |
-| 1 | fails in a full run but passes on its own: order-dependent or racy |
 
 The two lossy-deparse groups (345 and 38) are the same root cause; the first is kept separate
 because its trigger is understood and it is by far the largest single win available.
