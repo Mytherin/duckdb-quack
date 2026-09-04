@@ -41,14 +41,16 @@ Two of those flags are not optional here:
   batch size ten individually failing tests come back as "9 passed, 1 failed", which is fine for
   gating CI but useless for deciding which tests to skip. A fresh process per test also keeps the
   instance leak described at the end of this file bounded.
+* **`--retry 2`** - a few tests fail only intermittently over the wire; see the note on that under
+  "Regenerating the skip list".
 
 To run one test the way the runner would, take the `reproduce:` line it prints on failure.
 
 ### What is skipped, and why
 
-1437 of DuckDB's 4723 fast tests do not pass over a quack connection today. A sweep saw 3287
-passing; one more test is nondeterministic over the wire and fails only sometimes. The failing
-ones are listed in `skip_tests`, grouped by cause, so a fix shows up as a group that shrinks:
+1437 of DuckDB's 4723 tests do not pass over a quack connection today. The rest either pass or
+are skipped by a `require` of their own. The failing ones are listed in `skip_tests`, grouped by
+cause, so a fix shows up as a group that shrinks:
 
 | tests | cause |
 | ----- | ----- |
@@ -57,21 +59,22 @@ ones are listed in `skip_tests`, grouped by cause, so a fix shows up as a group 
 | 158 | `EXPLAIN` / plan inspection - the local plan is replaced by a single remote quack scan |
 | 138 | a remote result with duplicate column names cannot be bound |
 | 118 | sequences, types, indexes, macros and functions are invisible in the client catalog |
-| 72 | transaction semantics differ over the wire, mostly `cannot start a transaction within a transaction` |
+| 71 | transaction semantics differ over the wire, mostly `cannot start a transaction within a transaction` |
 | 53 | `ATTACH` fails outright: a remote table cannot be bound while the client builds the catalog |
 | 51 | catalog/metadata queries (`SHOW`, `duckdb_*`, `information_schema`, `pg_catalog`) describe the quack catalog |
-| 45 | remote error, not grouped further yet |
+| 44 | remote error, not grouped further yet |
 | 38 | the statement is re-serialized to SQL text lossily - lambdas come back as `->`, `NULL::TYPE` loses its cast, extension-type literals are emitted unquoted |
-| 33 | different result, not grouped further yet |
+| 32 | different result, not grouped further yet |
 | 25 | prepared statement parameters do not reach the server |
+| 24 | the client abandons an in-flight request: `superseded by a new query` |
 | 24 | the test collides with the config's own `on_init` (secret manager settings, or a server that is already serving) |
-| 22 | the client abandons an in-flight request: `superseded by a new query` |
 | 21 | feature not implemented in the quack storage extension |
 | 18 | a statement expected to fail succeeds over the connection |
 | 16 | the test leaves the connection somewhere `on_cleanup` cannot run from |
 | 15 | the remote error text differs beyond the exception type |
 | 4 | the test changes the instance so `on_init` cannot survive it (memory limit, threads) |
 | 2 | aborts the process (see below) |
+| 1 | fails in a full run but passes on its own: order-dependent or racy |
 
 The two lossy-deparse groups (345 and 38) are the same root cause; the first is kept separate
 because its trigger is understood and it is by far the largest single win available.
@@ -114,9 +117,12 @@ classifier re-runs just those few tests directly to find out why they failed.
 
 A sweep takes about an hour, since `--batch-size 1` means a process per test.
 
-A sweep also sees one run, so a test that is nondeterministic over the wire - a `UNION ALL` with no
-`ORDER BY`, say, whose branches race - can pass during the sweep and fail afterwards. Re-run the
-sweep, or add the test to the group it belongs in by hand.
+A handful of tests - mostly concurrency ones, and a `UNION ALL` with no `ORDER BY` whose branches
+race - fail only sometimes over the wire, and which of them fails varies from run to run. Skipping
+them outright would be too blunt, so both the sweep and the run pass `--retry 2`, the same value
+DuckDB's own CI uses: a test that merely flakes passes on a retry and never enters the skip list,
+while a test that fails every time still does. Keep the two in step - a sweep run with a different
+`--retry` than the run that consumes its list will disagree with it.
 
 ### Known caveat: the run can exhaust the process thread limit
 

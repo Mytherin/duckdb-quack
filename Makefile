@@ -18,8 +18,11 @@ include extension-ci-tools/makefiles/vcpkg.Makefile
 # --workers 1 because the config binds a fixed port (9494), so two unittest processes cannot run
 # it at once. --batch-size 1 because run_tests.py counts a failure per batch rather than per test,
 # and a fresh process per test also keeps the instance leak described in test/README.md bounded.
+# --retry 2 (what DuckDB's own CI uses) so the handful of concurrency tests that fail
+# intermittently over the wire do not have to be skipped outright; the same flag on the sweep
+# below keeps the skip list to tests that fail every time.
 DUCKDB_TESTS = python3 duckdb/scripts/ci/run_tests.py --test-flags "--test-dir duckdb" \
-	--workers 1 --batch-size 1
+	--workers 1 --batch-size 1 --retry 2
 
 test_duckdb: test_duckdb_release
 test_duckdb_release:

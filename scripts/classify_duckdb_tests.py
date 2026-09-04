@@ -8,7 +8,9 @@ broken today rather than a frozen snapshot. ``make test_duckdb_reclassify`` does
 
 The run must use ``--batch-size 1``: run_tests.py counts a failure per *batch*, not per test,
 so at the default batch size ten failing tests are reported as "9 passed, 1 failed" - fine for
-gating CI, useless for deciding which individual tests to skip.
+gating CI, useless for deciding which individual tests to skip. It should also use the same
+``--retry`` as the run that will consume the list, so that a test which merely flakes is not
+skipped outright.
 
 Usage:
     make test_duckdb_reclassify                            # sweep + write, the normal path
@@ -33,6 +35,8 @@ SEPARATOR = "=" * 80
 HEADER = re.compile(r"^\d+\. test/\S+?:\d+$", re.M)
 # "Binder Error: ...", "Invalid Input Error: ...", "Conversion Error: ..."
 ERROR = re.compile(r"^((?:\w+ )*?\w*Error): (.*)$", re.M)
+
+PASSES_ALONE = "*** this test passed when run again on its own ***"
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
 # run_tests.py brackets each failing test with a rule, names it, and closes with a reproduce line.
@@ -68,7 +72,12 @@ def rerun(test, config):
                               cwd=ROOT, capture_output=True, text=True, timeout=120)
     except (subprocess.TimeoutExpired, OSError):
         return "the test did not finish"
-    return done.stdout + done.stderr
+    output = done.stdout + done.stderr
+    # It failed in the suite and passes on its own: order-dependent, or plainly racy. Say so,
+    # because otherwise it arrives here as a failure with no reason attached at all.
+    if "All tests passed" in output:
+        return PASSES_ALONE + "\n" + output
+    return output
 
 
 def parse(block):
@@ -170,6 +179,12 @@ RULES = [
      "The test leaves the connection somewhere the config's on_cleanup cannot run from, so the "
      "clean-up routine fails rather than the test",
      says(r"Error while running clean-up routine")),
+
+    ("nondeterministic",
+     "Fails in a full run but passes when run again on its own: order-dependent, or racy over "
+     "the wire. Whether a given run catches one of these varies, which is also why both the "
+     "sweep and the run pass --retry",
+     says(re.escape(PASSES_ALONE))),
 
     ("crash_or_hang",
      "Aborts or hangs the unittest process, so it takes the whole run down rather than failing "
@@ -338,9 +353,13 @@ def main():
             config = json.load(f)
         reasons = {key: reason for key, reason, _ in RULES}
         config["skip_tests"] = [{"reason": reasons[key], "paths": groups[key]} for key in order]
-        with open(CONFIG, "w") as f:
+        # Write through a temporary file and rename: a suite may well be running against this
+        # config, and every unittest process re-reads it, so it must never be seen half-written.
+        temporary = CONFIG + ".tmp"
+        with open(temporary, "w") as f:
             json.dump(config, f, indent=2)
             f.write("\n")
+        os.replace(temporary, CONFIG)
         print(f"wrote {len(config['skip_tests'])} groups to {CONFIG}")
     return 0
 

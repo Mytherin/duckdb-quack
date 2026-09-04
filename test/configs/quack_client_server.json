@@ -57,6 +57,12 @@
       ]
     },
     {
+      "reason": "Fails in a full run but passes when run again on its own: order-dependent, or racy over the wire. Whether a given run catches one of these varies, which is also why both the sweep and the run pass --retry",
+      "paths": [
+        "test/sql/setops/test_union_subquery.test"
+      ]
+    },
+    {
       "reason": "Aborts or hangs the unittest process, so it takes the whole run down rather than failing on its own. Order-dependent: these pass when run alone",
       "paths": [
         "test/sql/catalog/comment_on_extended.test",
@@ -934,6 +940,7 @@
     {
       "reason": "The client abandons an in-flight request: 'superseded by a new query'",
       "paths": [
+        "test/fuzzer/pedro/concurrent_catalog_usage.test",
         "test/issues/general/test_17446.test",
         "test/sql/catalog/dependencies/drop_recreate_schema_dependency.test",
         "test/sql/catalog/dependencies/test_concurrent_drop.test",
@@ -1239,7 +1246,6 @@
     {
       "reason": "The remote error text differs from what the test expects, beyond the exception type",
       "paths": [
-        "test/fuzzer/pedro/concurrent_catalog_usage.test",
         "test/sql/aggregate/aggregates/test_approx_quantile.test",
         "test/sql/catalog/dependencies/test_prepare_dependencies_transactions.test",
         "test/sql/catalog/did_you_mean.test",
